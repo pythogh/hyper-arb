@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 
 # --- CONFIGURATION STREAMLIT ---
 st.set_page_config(page_title="HL TradFi Arb", layout="wide")
-st.title("🏛️ Hyperliquid TradFi (HIP-3) Arbitrage Scout")
+st.title("🏛️ Hyperliquid TradFi Arbitrage Scout (USDH Edition)")
 
 # --- INIT API ---
 BASE_URL = "https://api.hyperliquid.xyz"
@@ -16,90 +16,90 @@ def init_info():
 
 info = init_info()
 
-# --- RÉCUPÉRATION DES MÉTADONNÉES HIP-3 ---
-@st.cache_data(ttl=60)
-def fetch_tradfi_universe():
+# --- RÉCUPÉRATION DES PRIX ---
+@st.cache_data(ttl=10)
+def fetch_all_prices():
     try:
-        meta = info.meta()
-        universe = meta.get('universe', [])
-        
-        # Sur HL, les stocks HIP-3 ont souvent un nom qui commence par '@' 
-        # ou des propriétés spécifiques dans le dictionnaire meta.
-        # On va lister tout ce qui ressemble à un stock ou un index.
-        tradfi_assets = []
-        for asset in universe:
-            name = asset['name']
-            # On cherche les paires de base (souvent @1, @2... ou direct NVDA)
-            # Et on vérifie si une version -USDT existe dans le même univers
-            tradfi_assets.append(name)
-            
-        return tradfi_assets, meta
+        return info.all_mids()
     except Exception as e:
-        st.error(f"Erreur meta : {e}")
-        return [], {}
+        st.error(f"Erreur API Prices: {e}")
+        return {}
 
-# --- LOGIQUE DE DÉTECTION DES PAIRES ARB ---
-universe_names, full_meta = fetch_tradfi_universe()
-prices = info.all_mids()
+all_prices = fetch_all_prices()
 
-hip3_pairs = []
-for name in universe_names:
-    # On cherche le pattern : 'Asset' vs 'Asset-USDT' ou 'Asset-USDS'
-    # Dans HIP-3, l'actif de base est souvent @NUMERO
-    if f"{name}-USDT" in universe_names:
-        hip3_pairs.append(name)
+# --- LOGIQUE DE DÉTECTION MANUELLE ---
+# Liste des stocks connus sur HL TradFi (HIP-3)
+known_stocks = ["NVDA", "HOOD", "TSLA", "AAPL", "GOOGL", "MSFT", "META", "AMZN", "NFLX", "COIN", "MSTR"]
+stable_suffixes = ["-USDT", "-USDH"]
 
-# --- INTERFACE SIDEBAR ---
-st.sidebar.header("Configuration TradFi")
-selected_assets = st.sidebar.multiselect(
-    "Actifs HIP-3 détectés",
-    options=sorted(hip3_pairs) if hip3_pairs else ["NVDA", "HOOD", "AAPL", "TSLA"],
-    default=hip3_pairs[:5] if len(hip3_pairs) > 5 else hip3_pairs
-)
+st.sidebar.header("Configuration")
+selected_stable = st.sidebar.selectbox("Comparer USDC contre :", stable_suffixes)
 
-stable_choice = st.sidebar.selectbox("Stablecoin de comparaison", ["USDT", "USDS"])
+# --- ANALYSE ---
+data_rows = []
 
-# --- DASHBOARD ---
-if not selected_assets:
-    st.info("Sélectionnez des actifs. Si la liste est vide, c'est que le filtre HIP-3 doit être ajusté selon les noms réels.")
-    with st.expander("Consulter tous les noms de l'Universe (HIP-3 Debug)"):
-        st.write(universe_names)
-else:
-    results = []
-    for asset in selected_assets:
-        ticker_usdc = asset
-        ticker_stable = f"{asset}-{stable_choice}"
+if all_prices:
+    for stock in known_stocks:
+        # On teste différentes variantes de noms que HL pourrait utiliser
+        # 1. Direct (ex: NVDA)
+        # 2. Préfixé (ex: @NVDA)
+        # 3. Suffixé (ex: NVDA/USD)
         
-        p_usdc = float(prices.get(ticker_usdc, 0))
-        p_stable = float(prices.get(ticker_stable, 0))
+        variants = [stock, f"@{stock}", f"{stock}/USD"]
         
-        if p_usdc > 0 and p_stable > 0:
-            spread = ((p_stable - p_usdc) / p_usdc) * 100
+        for v in variants:
+            ticker_a = v
+            ticker_b = f"{v}{selected_stable}"
             
-            # Récupération Funding rapide
-            try:
-                # On récupère le dernier taux pour les deux
-                f_usdc = float(info.funding_history(ticker_usdc, int(time.time()*1000)-3600000, int(time.time()*1000))[0]['fundingRate'])
-                f_stable = float(info.funding_history(ticker_stable, int(time.time()*1000)-3600000, int(time.time()*1000))[0]['fundingRate'])
-                apr = (f_stable - f_usdc) * 24 * 365 * 100
-            except:
-                f_usdc, f_stable, apr = 0, 0, 0
+            p_a = float(all_prices.get(ticker_a, 0))
+            p_b = float(all_prices.get(ticker_b, 0))
+            
+            if p_a > 0 and p_b > 0:
+                spread = ((p_b - p_a) / p_a) * 100
+                
+                # Récupération Funding rapide
+                try:
+                    # On prend le dernier taux (index 0)
+                    end = int(time.time() * 1000)
+                    f_a = float(info.funding_history(ticker_a, end-3600000, end)[0]['fundingRate'])
+                    f_b = float(info.funding_history(ticker_b, end-3600000, end)[0]['fundingRate'])
+                    net_apr = (f_b - f_a) * 24 * 365 * 100
+                except:
+                    f_a, f_b, net_apr = 0, 0, 0
 
-            results.append({
-                "Asset": asset,
-                "Price USDC": p_usdc,
-                f"Price {stable_choice}": p_stable,
-                "Spread %": round(spread, 4),
-                "Net APR %": round(apr, 2)
-            })
+                data_rows.append({
+                    "Stock": stock,
+                    "Ticker A": ticker_a,
+                    "Ticker B": ticker_b,
+                    "Prix A": p_a,
+                    "Prix B": p_b,
+                    "Spread %": round(spread, 4),
+                    "Net APR %": round(net_apr, 2)
+                })
+                break # Si on a trouvé une variante qui marche, on passe au stock suivant
 
-    if results:
-        df = pd.DataFrame(results)
-        st.dataframe(df.style.background_gradient(subset=['Net APR %'], cmap='RdYlGn'), use_container_width=True)
-        
-        # Graphique
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=df['Asset'], y=df['Spread %'], name="Spread %", marker_color='gold'))
-        fig.add_trace(go.Scatter(x=df['Asset'], y=df['Net APR %'], name="APR %", yaxis="y2", line=dict(color='cyan')))
-        fig.update_layout(yaxis2=dict(overlaying='y', side='right'), template="plotly_dark")
-        st.plotly_chart(fig, use_container_width=True)
+# --- AFFICHAGE ---
+if data_rows:
+    df = pd.DataFrame(data_rows)
+    st.success(f"Détecté {len(df)} opportunités d'arbitrage !")
+    
+    st.dataframe(df.style.background_gradient(subset=['Net APR %'], cmap='RdYlGn'), use_container_width=True)
+    
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=df['Stock'], y=df['Spread %'], name="Spread Prix %"))
+    fig.add_trace(go.Scatter(x=df['Stock'], y=df['Net APR %'], name="APR Funding %", yaxis="y2"))
+    fig.update_layout(yaxis2=dict(overlaying='y', side='right'), template="plotly_dark")
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("Aucun actif TradFi détecté avec les noms standards.")
+    
+    with st.expander("🛠️ DEBUG : Cliquer ici pour voir les noms de TOUS les actifs HIP-3"):
+        # On va chercher spécifiquement les actifs qui ont un '-' dans le nom mais qui ne sont pas des perps classiques
+        all_keys = sorted(list(all_prices.keys()))
+        hip3_candidates = [k for k in all_keys if "-" in k and any(s in k for s in stable_suffixes)]
+        st.write("Candidats potentiels (contenant USDT ou USDH) :", hip3_candidates)
+        st.write("Aperçu de 50 tickers au hasard :", all_keys[:50])
+
+if st.button("🔄 Rafraîchir"):
+    st.cache_data.clear()
+    st.rerun()
