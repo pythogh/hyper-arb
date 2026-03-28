@@ -4,11 +4,9 @@ import time
 from hyperliquid.info import Info
 import plotly.graph_objects as go
 
-# --- CONFIGURATION STREAMLIT ---
-st.set_page_config(page_title="HL Arb Debugger", layout="wide")
-st.title("🔍 Hyperliquid API Debugger & Arb Scout")
+st.set_page_config(page_title="HL Arb Finder", layout="wide")
 
-# --- INITIALISATION API ---
+# --- INIT ---
 BASE_URL = "https://api.hyperliquid.xyz"
 @st.cache_resource
 def init_info():
@@ -16,78 +14,71 @@ def init_info():
 
 info = init_info()
 
-# --- RÉCUPÉRATION BRUTE DES PRIX ---
+# --- DATA ---
 @st.cache_data(ttl=10)
-def fetch_all_prices():
-    try:
-        prices = info.all_mids()
-        return prices
-    except Exception as e:
-        st.error(f"Erreur lors de l'appel API all_mids : {e}")
-        return {}
+def fetch_data():
+    prices = info.all_mids()
+    return prices
 
-prices = fetch_all_prices()
+prices = fetch_data()
 
-# --- SECTION DIAGNOSTIC (TRÈS IMPORTANT) ---
-with st.expander("🛠️ DEBUG : Liste de tous les Tickers détectés par l'API"):
-    if prices:
-        all_tickers = sorted(list(prices.keys()))
-        st.write(f"Nombre total d'actifs trouvés : {len(all_tickers)}")
-        # On affiche les 20 premiers et ceux qui contiennent NVDA ou HOOD
-        search_term = st.text_input("Rechercher un ticker spécifique (ex: NVDA, HOOD, @) :", "NVDA")
-        filtered_list = [t for t in all_tickers if search_term.upper() in t.upper()]
-        st.write("Résultats de recherche :", filtered_list)
-        st.write("Tous les tickers :", all_tickers)
-    else:
-        st.warning("L'API n'a renvoyé aucun prix.")
-
-# --- LOGIQUE D'ARBITRAGE ---
-st.sidebar.header("Configuration")
-
-# Tentative de détection des paires
-st.sidebar.subheader("Paires détectées")
-pairs_to_check = []
+# --- LOGIQUE DE DÉTECTION ---
+# On identifie les paires de type 'ACTIF' et 'ACTIF-USDT'
+detected_pairs = []
 if prices:
-    for t in prices.keys():
-        # Si on trouve 'NVDA' et 'NVDA-USDT', ou '@NVDA' et '@NVDA-USDT'
-        if "-USDT" in t:
-            base_name = t.replace("-USDT", "")
-            if base_name in prices:
-                pairs_to_check.append(base_name)
+    for ticker in prices.keys():
+        if "-USDT" in ticker:
+            base = ticker.replace("-USDT", "")
+            if base in prices:
+                detected_pairs.append(base)
 
-target_stocks = st.sidebar.multiselect(
-    "Actifs à arbitrer", 
-    options=sorted(list(set(pairs_to_check))) if pairs_to_check else ["NVDA", "HOOD", "TSLA"],
-    default=pairs_to_check[:5] if pairs_to_check else []
-)
+# --- INTERFACE ---
+st.title("🚀 Arbitrage Opportunité")
 
-stable_choice = st.sidebar.selectbox("Comparer USDC vs :", ["USDT", "USDS"])
+st.sidebar.header("Configuration")
+if not detected_pairs:
+    st.sidebar.error("Aucune paire -USDT détectée. Regardez les noms bruts.")
+    # On affiche les 50 premiers tickers pour t'aider à trouver le bon format
+    st.sidebar.write("Exemples de noms réels :", list(prices.keys())[:20])
+else:
+    st.sidebar.success(f"{len(detected_pairs)} paires d'arbitrage trouvées !")
+
+# Sélection de l'actif
+selected_stock = st.sidebar.selectbox("Choisir l'actif à analyser", options=sorted(detected_pairs) if detected_pairs else ["Aucun"])
 
 # --- CALCUL ---
-data_rows = []
-if target_stocks:
-    for stock in target_stocks:
-        p_usdc = float(prices.get(stock, 0))
-        p_stable = float(prices.get(f"{stock}-{stable_choice}", 0))
-        
-        if p_usdc > 0 and p_stable > 0:
-            spread = ((p_stable - p_usdc) / p_usdc) * 100
-            
-            # Pour le debug, on affiche simplifié sans le funding pour l'instant
-            data_rows.append({
-                "Ticker": stock,
-                "Prix USDC": p_usdc,
-                f"Prix {stable_choice}": p_stable,
-                "Spread %": round(spread, 4)
-            })
-
-if data_rows:
-    st.success(f"Données récupérées pour {len(data_rows)} actifs.")
-    df = pd.DataFrame(data_rows)
-    st.dataframe(df, use_container_width=True)
+if selected_stock != "Aucun":
+    p_usdc = float(prices.get(selected_stock))
+    p_usdt = float(prices.get(f"{selected_stock}-USDT"))
     
-    fig = go.Figure(go.Bar(x=df['Ticker'], y=df['Spread %'], marker_color='gold'))
-    fig.update_layout(title="Spread en temps réel (%)", template="plotly_dark")
-    st.plotly_chart(fig, use_container_width=True)
+    spread = ((p_usdt - p_usdc) / p_usdc) * 100
+    
+    # Affichage
+    col1, col2, col3 = st.columns(3)
+    col1.metric(f"Prix {selected_stock} (USDC)", f"${p_usdc:,.3f}")
+    col2.metric(f"Prix {selected_stock} (USDT)", f"${p_usdt:,.3f}")
+    col3.metric("Spread", f"{spread:.4f}%", delta=f"{p_usdt-p_usdc:.4f}$")
+
+    # Historique de Funding rapide
+    st.write("---")
+    st.subheader(f"Comparatif Funding : {selected_stock}")
+    
+    with st.spinner("Récupération du funding..."):
+        def get_f(coin):
+            end = int(time.time() * 1000)
+            data = info.funding_history(coin, end - (3600000 * 5), end)
+            return float(data[0]['fundingRate']) if data else 0.0
+
+        f_usdc = get_f(selected_stock)
+        f_usdt = get_f(f"{selected_stock}-USDT")
+        
+        apr = (f_usdt - f_usdc) * 24 * 365 * 100
+        
+        c1, c2, c3 = st.columns(3)
+        c1.write(f"Funding USDC: **{f_usdc:.6%}**")
+        c2.write(f"Funding USDT: **{f_usdt:.6%}**")
+        c3.info(f"APR Arbitrage: **{apr:.2f}%**")
+
 else:
-    st.info("Sélectionnez des actifs valides. Utilisez le menu 'DEBUG' au-dessus pour voir comment l'API nomme vos stocks.")
+    st.warning("Veuillez sélectionner un actif dans la liste à gauche.")
+    st.write("Si la liste est vide, c'est que les stocks n'utilisent pas le suffixe -USDT sur cet exchange.")
