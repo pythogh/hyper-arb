@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import time
 from hyperliquid.info import Info
-from hyperliquid.utils import constants
 import plotly.graph_objects as go
 
 # --- CONFIGURATION STREAMLIT ---
@@ -10,142 +9,129 @@ st.set_page_config(page_title="Hyperliquid Arb Scout", layout="wide")
 st.title("📊 Hyperliquid Stock Arbitrage & Funding Scout")
 
 # --- INITIALISATION API ---
-# On simplifie l'init pour éviter les TypeError sur les arguments optionnels
 BASE_URL = "https://api.hyperliquid.xyz"
 try:
-    # Initialisation standard sans arguments superflus
     info = Info(BASE_URL)
 except Exception as e:
-    st.error(f"Erreur d'initialisation du SDK Hyperliquid : {e}")
+    st.error(f"Erreur d'initialisation : {e}")
     st.stop()
 
 # --- FONCTIONS DE RÉCUPÉRATION ---
 
+@st.cache_data(ttl=60)
+def get_universe_data():
+    """Récupère tous les noms d'actifs disponibles"""
+    try:
+        meta = info.meta()
+        # On extrait tous les noms des actifs du "universe"
+        names = [coin['name'] for coin in meta['universe']]
+        return names
+    except:
+        return []
+
 @st.cache_data(ttl=30)
-def get_live_data():
+def get_live_prices():
     """Récupère les prix mid de tous les actifs"""
     try:
         return info.all_mids()
-    except Exception as e:
-        st.error(f"Erreur lors de la récupération des prix : {e}")
+    except:
         return {}
 
-@st.cache_data(ttl=300) # Cache de 5 minutes pour le funding
+@st.cache_data(ttl=300)
 def get_funding_info(coin):
-    """Récupère le taux de funding actuel via l'historique récent"""
+    """Récupère le taux de funding horaire actuel"""
     end_time = int(time.time() * 1000)
-    # On regarde les 8 dernières heures pour être sûr d'avoir le dernier point
     start_time = end_time - (8 * 60 * 60 * 1000)
     try:
-        # La méthode funding_history est la plus fiable pour extraire le taux exact
         data = info.funding_history(coin, start_time, end_time)
-        if data and len(data) > 0:
-            # Le premier élément est généralement le plus récent
-            last_rate = float(data[0]['fundingRate'])
-            return last_rate
+        if data:
+            return float(data[0]['fundingRate'])
     except:
-        return 0.0
+        pass
     return 0.0
 
-# --- SIDEBAR : FILTRES ---
+# --- LOGIQUE DE DÉTECTION DES PAIRES ---
+all_available_names = get_universe_data()
+all_prices = get_live_prices()
+
+# On filtre pour trouver les paires qui ont un équivalent -USDT ou -USDS
+# Sur HL, la version USDC est souvent juste le nom (ex: "NVDA")
+base_stocks = []
+for name in all_available_names:
+    if f"{name}-USDT" in all_available_names or f"{name}-USDS" in all_available_names:
+        if "-" not in name: # On évite de prendre le -USDT comme base
+            base_stocks.append(name)
+
+# --- SIDEBAR ---
 st.sidebar.header("Configuration")
-# Liste étendue des tickers stocks dispos sur HL
-available_tickers = ["NVDA", "HOOD", "GOOGL", "MSFT", "TSLA", "AAPL", "META", "AMZN", "NFLX", "COIN", "MSTR"]
 target_stocks = st.sidebar.multiselect(
-    "Actions à surveiller", 
-    available_tickers,
-    default=["NVDA", "HOOD", "TSLA"]
+    "Actions / Actifs détectés", 
+    options=sorted(base_stocks) if base_stocks else ["Vérification en cours..."],
+    default=base_stocks[:3] if len(base_stocks) > 3 else base_stocks
 )
 
-if st.sidebar.button("🔄 Actualiser les données"):
+stable_choice = st.sidebar.selectbox("Comparer USDC contre :", ["USDT", "USDS"])
+
+if st.sidebar.button("🔄 Forcer l'actualisation"):
     st.cache_data.clear()
     st.rerun()
 
-# --- LOGIQUE PRINCIPALE ---
-
-all_prices = get_live_data()
+# --- CALCUL DES OPPORTUNITÉS ---
 data_rows = []
 
-if not all_prices:
-    st.warning("Impossible de charger les prix. Vérifiez votre connexion à l'API Hyperliquid.")
+if not target_stocks:
+    st.info("Sélectionnez des actifs dans la barre latérale. Si la liste est vide, l'API ne renvoie pas de paires synthétiques pour le moment.")
 else:
-    with st.spinner('Analyse des spreads et des taux de funding...'):
+    with st.spinner('Analyse en cours...'):
         for stock in target_stocks:
-            # Paire A: USDC (Ticker seul)
-            # Paire B: USDT (Ticker-USDT)
-            ticker_usdc = stock
-            ticker_usdt = f"{stock}-USDT"
+            ticker_a = stock # Version USDC
+            ticker_b = f"{stock}-{stable_choice}" # Version choisie
             
-            p_usdc = float(all_prices.get(ticker_usdc, 0))
-            p_usdt = float(all_prices.get(ticker_usdt, 0))
+            p_a = float(all_prices.get(ticker_a, 0))
+            p_b = float(all_prices.get(ticker_b, 0))
             
-            if p_usdc > 0 and p_usdt > 0:
-                # Calcul du Spread
-                spread_abs = p_usdt - p_usdc
-                spread_pct = (spread_abs / p_usdc) * 100
+            if p_a > 0 and p_b > 0:
+                spread_pct = ((p_b - p_a) / p_a) * 100
                 
-                # Récupération du Funding
-                f_usdc = get_funding_info(ticker_usdc)
-                f_usdt = get_funding_info(ticker_usdt)
+                f_a = get_funding_info(ticker_a)
+                f_b = get_funding_info(ticker_b)
                 
-                # Différentiel de Funding (Arbitrage Short USDT / Long USDC)
-                net_funding_hourly = f_usdt - f_usdc
-                # APR = Taux horaire * 24h * 365j
-                net_funding_apr = net_funding_hourly * 24 * 365 * 100
+                # Arbitrage : Short B, Long A
+                net_apr = (f_b - f_a) * 24 * 365 * 100
                 
                 data_rows.append({
-                    "Ticker": stock,
-                    "Price USDC": round(p_usdc, 3),
-                    "Price USDT": round(p_usdt, 3),
+                    "Actif": stock,
+                    f"Prix USDC": p_a,
+                    f"Prix {stable_choice}": p_b,
                     "Spread %": round(spread_pct, 4),
-                    "Funding USDC (h)": f"{f_usdc:.5%}",
-                    "Funding USDT (h)": f"{f_usdt:.5%}",
-                    "Net APR (%)": round(net_funding_apr, 2)
+                    "Net APR %": round(net_apr, 2),
+                    "Funding A (h)": f"{f_a:.5%}",
+                    "Funding B (h)": f"{f_b:.5%}"
                 })
 
 # --- AFFICHAGE ---
-
 if data_rows:
     df = pd.DataFrame(data_rows)
     
-    # Dashboard Metrics
-    st.subheader("Points chauds d'arbitrage")
+    # Métriques
     cols = st.columns(len(data_rows))
     for i, row in df.iterrows():
-        # L'APR est vert s'il est > 5% (seuil arbitraire de rentabilité)
-        color = "normal" if row['Net APR (%)'] > 5 else "off"
-        cols[i].metric(
-            label=row['Ticker'], 
-            value=f"{row['Spread %']}% Sprd", 
-            delta=f"{row['Net APR (%)']}% APR",
-            delta_color=color
-        )
+        cols[i].metric(row['Actif'], f"{row['Spread %']}%", f"{row['Net APR %']}% APR")
 
     st.write("---")
+    st.subheader("Tableau de bord de l'arbitrage")
+    st.dataframe(df, use_container_width=True)
     
-    # Tableau
-    st.subheader("Analyse comparative USDC vs USDT")
-    st.dataframe(
-        df.style.background_gradient(subset=['Net APR (%)'], cmap='RdYlGn'),
-        use_container_width=True
-    )
-
     # Graphique
-    st.write("---")
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df['Ticker'], y=df['Spread %'], name='Spread Prix (%)', marker_color='#FFA07A'))
-    fig.add_trace(go.Scatter(x=df['Ticker'], y=df['Net APR (%)'], name='Net APR Funding (%)', yaxis='y2', line=dict(color='#00CC96', width=3)))
-
+    fig.add_trace(go.Bar(x=df['Actif'], y=df['Spread %'], name="Spread %"))
+    fig.add_trace(go.Scatter(x=df['Actif'], y=df['Net APR %'], name="APR %", yaxis="y2"))
     fig.update_layout(
-        title="Relation Spread vs APR (Potentiel d'arbitrage)",
-        yaxis=dict(title="Spread Prix (%)"),
-        yaxis2=dict(title="Net APR (%)", overlaying='y', side='right'),
+        yaxis2=dict(overlaying='y', side='right'),
         template="plotly_dark",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        legend=dict(orientation="h")
     )
     st.plotly_chart(fig, use_container_width=True)
-
 else:
-    st.info("Sélectionnez des tickers dans la barre latérale pour commencer l'analyse.")
-
-st.sidebar.info("💡 **Stratégie :** Si l'APR est positif et élevé, vous gagnez de l'argent en vendant la paire USDT et en achetant la paire USDC tout en restant neutre sur le prix de l'action.")
+    if target_stocks:
+        st.error("Données de prix introuvables pour les paires sélectionnées. Il est possible que les marchés soient fermés ou que les noms aient changé.")
