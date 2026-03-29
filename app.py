@@ -1,109 +1,111 @@
-import streamlit as st
-import pandas as pd
+import requests
 import time
-from hyperliquid.info import Info
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="HL Multi-Deployer Scout", layout="wide")
-st.title("🌐 Hyperliquid HIP-3 Multi-Deployer Scout")
-st.markdown("_TradeXYZ (USDC) | Dreamcash (USDT) | Kinetiq (USDH)_")
+API_URL = "https://api.hyperliquid.xyz/info"
 
-BASE_URL = "https://api.hyperliquid.xyz"
-@st.cache_resource
-def get_api():
-    return Info(BASE_URL)
-
-info = get_api()
-
-def fetch_comprehensive_data():
-    try:
-        # web_data2 est l'appel le plus complet utilisé par l'UI officielle
-        # Il contient les "extra" assets du HIP-3
-        data = info.web_data2("0x0000000000000000000000000000000000000000") # Adresse nulle pour les données globales
-        
-        # Extraction des contextes d'actifs (Asset Contexts)
-        # C'est ici que les prix des différents déployeurs sont agrégés
-        all_assets = data.get('assetCtxs', [])
-        meta = data.get('meta', {}).get('universe', [])
-        
-        # Mapping Index -> Nom via l'univers du web_data
-        mapping = {i: asset['name'] for i, asset in enumerate(meta)}
-        
-        rows = []
-        for i, ctx in enumerate(all_assets):
-            name = mapping.get(i, f"Unknown_{i}")
-            
-            # Dans web_data2, le prix mid est souvent dans 'midSz' ou calculé via bid/ask
-            # On cherche les infos spécifiques aux HIP-3
-            mid_price = ctx.get('midSz')
-            
-            # On identifie le déployeur par le nom du ticker (ex: XYZ:NVDA)
-            # ou par la structure du nom si elle contient le stable
-            rows.append({
-                "Ticker": name,
-                "Prix": float(mid_price) if mid_price else None,
-                "Daily Vol": ctx.get('dayNtlVlm', 0),
-                "Funding": ctx.get('funding', 0)
-            })
-        return rows
-    except Exception as e:
-        st.error(f"Erreur web_data2 : {e}")
-        # Si web_data2 échoue, on tente une approche brute par le mapping ID
-        return []
-
-# --- MAPPING MANUEL DES IDS HIP-3 ---
-# Puisque tu as confirmé les IDs (408 = NVDA, etc.)
-ID_MAP = {
-    "407": "TSLA",
-    "408": "NVDA",
-    "412": "GOOGL",
-    "411": "SLV"
+# Assets HIP-3 identifiés
+ASSETS = {
+    "NVDA": "@408",
+    "TSLA": "@407",
+    "GOOGL": "@412"
 }
 
-data_rows = fetch_comprehensive_data()
+# Deployers / DEX
+DEXES = {
+    "TradeXYZ": "XYZ",
+    "Dreamcash": "DRM",
+    "Kinetiq": "KIN"
+}
 
-if data_rows:
-    df_all = pd.DataFrame(data_rows)
-    
-    # Filtrage intelligent
-    # On cherche les lignes qui contiennent nos IDs cibles ou les noms des actions
-    st.subheader("📊 Marchés Détectés par Déployeur")
-    
-    # On crée des colonnes virtuelles pour l'arbitrage
-    arb_results = []
-    
-    for asset_id, stock_name in ID_MAP.items():
-        # On cherche toutes les déclinaisons de cet ID (ex: @408, XYZ:NVDA, etc.)
-        # Selon le déployeur, le nom varie
-        matches = df_all[df_all['Ticker'].str.contains(asset_id) | df_all['Ticker'].str.contains(stock_name)]
-        
-        if not matches.empty:
-            arb_entry = {"Stock": stock_name, "ID": asset_id}
-            for _, match in matches.iterrows():
-                t = match['Ticker']
-                p = match['Prix']
-                # Identification de la quote/déployeur par le suffixe ou préfixe
-                if "USDT" in t or "Cash" in t:
-                    arb_entry["USDT (Dreamcash)"] = p
-                elif "USDH" in t or "km" in t:
-                    arb_entry["USDH (Kinetiq)"] = p
-                else:
-                    arb_entry["USDC (TradeXYZ)"] = p
-            arb_results.append(arb_entry)
+def get_l2_book(asset_id, dex):
+    payload = {
+        "type": "l2Book",
+        "coin": asset_id,
+        "dex": dex
+    }
 
-    if arb_results:
-        df_arb = pd.DataFrame(arb_results)
-        st.write("### Comparaison Inter-Déployeurs")
-        st.table(df_arb)
-        
-        # Calcul du spread si possible
-        if "USDC (TradeXYZ)" in df_arb.columns and "USDT (Dreamcash)" in df_arb.columns:
-            st.info("💡 Spread détecté entre TradeXYZ et Dreamcash")
-    else:
-        st.warning("Aucune correspondance trouvée pour les IDs TradFi. Les marchés sont peut-être listés sous des noms de 'Vaults'.")
-        with st.expander("Voir tous les tickers bruts détectés"):
-            st.write(df_all['Ticker'].tolist())
-else:
-    st.error("Impossible de récupérer les données globales.")
+    try:
+        r = requests.post(API_URL, json=payload)
+        data = r.json()
 
-st.button("🔄 Scanner l'EVM")
+        bid = float(data["levels"][0][0]["px"])
+        ask = float(data["levels"][1][0]["px"])
+
+        mid = (bid + ask) / 2
+
+        return {
+            "bid": bid,
+            "ask": ask,
+            "mid": mid
+        }
+
+    except Exception:
+        return None
+
+
+def scan_markets():
+
+    results = {}
+
+    for asset, asset_id in ASSETS.items():
+
+        results[asset] = {}
+
+        for dex_name, dex_code in DEXES.items():
+
+            book = get_l2_book(asset_id, dex_code)
+
+            if book:
+                results[asset][dex_name] = book["mid"]
+            else:
+                results[asset][dex_name] = None
+
+    return results
+
+
+def find_arbitrage(prices):
+
+    for asset, dex_prices in prices.items():
+
+        dex_list = list(dex_prices.keys())
+
+        for i in range(len(dex_list)):
+            for j in range(i+1, len(dex_list)):
+
+                d1 = dex_list[i]
+                d2 = dex_list[j]
+
+                p1 = dex_prices[d1]
+                p2 = dex_prices[d2]
+
+                if p1 is None or p2 is None:
+                    continue
+
+                spread = p1 - p2
+
+                if abs(spread) > 0.2:   # seuil arbitrage
+
+                    print(
+                        f"ARBITRAGE {asset}: "
+                        f"{d1}={p1:.2f} vs {d2}={p2:.2f} "
+                        f"spread={spread:.2f}"
+                    )
+
+
+def main():
+
+    while True:
+
+        prices = scan_markets()
+
+        print("\nPrices:")
+        for asset in prices:
+            print(asset, prices[asset])
+
+        find_arbitrage(prices)
+
+        time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()
