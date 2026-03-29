@@ -1,111 +1,63 @@
 import requests
 import time
 
-API_URL = "https://api.hyperliquid.xyz/info"
+URL = "https://api.hyperliquid.xyz/info"
 
-# Assets HIP-3 identifiés
-ASSETS = {
-    "NVDA": "@408",
-    "TSLA": "@407",
-    "GOOGL": "@412"
-}
+# coins HIP3
+COINS = [
+    "xyz:NVDA",
+    "drm:NVDA",
+    "kin:NVDA",
 
-# Deployers / DEX
-DEXES = {
-    "TradeXYZ": "XYZ",
-    "Dreamcash": "DRM",
-    "Kinetiq": "KIN"
-}
+    "xyz:TSLA",
+    "drm:TSLA",
+    "kin:TSLA",
 
-def get_l2_book(asset_id, dex):
+    "xyz:GOOGL",
+    "drm:GOOGL",
+    "kin:GOOGL",
+]
+
+
+def get_mid(coin):
+
     payload = {
         "type": "l2Book",
-        "coin": asset_id,
-        "dex": dex
+        "coin": coin
     }
 
     try:
-        r = requests.post(API_URL, json=payload)
+        r = requests.post(URL, json=payload, timeout=5)
         data = r.json()
 
-        bid = float(data["levels"][0][0]["px"])
-        ask = float(data["levels"][1][0]["px"])
+        bids = data["levels"][0]
+        asks = data["levels"][1]
+
+        bid = float(bids[0]["px"])
+        ask = float(asks[0]["px"])
 
         mid = (bid + ask) / 2
 
-        return {
-            "bid": bid,
-            "ask": ask,
-            "mid": mid
-        }
+        return mid
 
-    except Exception:
+    except Exception as e:
+        print("error", coin, e)
         return None
 
 
-def scan_markets():
+while True:
 
-    results = {}
+    prices = {}
 
-    for asset, asset_id in ASSETS.items():
+    for coin in COINS:
 
-        results[asset] = {}
+        mid = get_mid(coin)
 
-        for dex_name, dex_code in DEXES.items():
+        if mid:
+            prices[coin] = mid
 
-            book = get_l2_book(asset_id, dex_code)
+    print("\nPrices:")
+    for k, v in prices.items():
+        print(k, v)
 
-            if book:
-                results[asset][dex_name] = book["mid"]
-            else:
-                results[asset][dex_name] = None
-
-    return results
-
-
-def find_arbitrage(prices):
-
-    for asset, dex_prices in prices.items():
-
-        dex_list = list(dex_prices.keys())
-
-        for i in range(len(dex_list)):
-            for j in range(i+1, len(dex_list)):
-
-                d1 = dex_list[i]
-                d2 = dex_list[j]
-
-                p1 = dex_prices[d1]
-                p2 = dex_prices[d2]
-
-                if p1 is None or p2 is None:
-                    continue
-
-                spread = p1 - p2
-
-                if abs(spread) > 0.2:   # seuil arbitrage
-
-                    print(
-                        f"ARBITRAGE {asset}: "
-                        f"{d1}={p1:.2f} vs {d2}={p2:.2f} "
-                        f"spread={spread:.2f}"
-                    )
-
-
-def main():
-
-    while True:
-
-        prices = scan_markets()
-
-        print("\nPrices:")
-        for asset in prices:
-            print(asset, prices[asset])
-
-        find_arbitrage(prices)
-
-        time.sleep(3)
-
-
-if __name__ == "__main__":
-    main()
+    time.sleep(2)
