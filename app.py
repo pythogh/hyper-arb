@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
+import time
 from hyperliquid.info import Info
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="HL NVDA Debugger", layout="wide")
-st.title("🔍 Recherche de 'NVDA' sur Hyperliquid")
+st.set_page_config(page_title="HL HIP-3 Decoder", layout="wide")
+st.title("🏛️ Hyperliquid HIP-3 (TradFi) Specialist")
 
 BASE_URL = "https://api.hyperliquid.xyz"
 @st.cache_resource
@@ -13,71 +14,70 @@ def init_info():
 
 info = init_info()
 
-# --- BOUTON DE RECHARGE ---
-if st.sidebar.button("Forcer rafraîchissement"):
-    st.cache_data.clear()
-    st.rerun()
-
-# --- ÉTAPE 1 : RECHERCHE DANS LES PERPS (META) ---
-st.header("1. Recherche dans l'Univers des Perps (Meta)")
-try:
-    meta = info.meta()
-    perp_names = [asset['name'] for asset in meta.get('universe', [])]
-    nvda_perps = [n for n in perp_names if "NVDA" in n.upper()]
-    
-    if nvda_perps:
-        st.success(f"Trouvé dans Perps : {nvda_perps}")
-    else:
-        st.info("Aucune trace de NVDA dans les Perps classiques.")
-except Exception as e:
-    st.error(f"Erreur Meta Perps : {e}")
-
-# --- ÉTAPE 2 : RECHERCHE DANS LE SPOT (SPOT_META) ---
-st.header("2. Recherche dans l'Univers Spot (Spot Meta)")
-try:
-    spot_meta = info.spot_meta()
-    
-    # On regarde les Tokens (les actifs eux-mêmes)
-    tokens = spot_meta.get('tokens', [])
-    nvda_tokens = [t for t in tokens if "NVDA" in t['name'].upper()]
-    
-    # On regarde les Paires (les marchés de trading)
-    universe = spot_meta.get('universe', [])
-    nvda_pairs = [p['name'] for p in universe if "NVDA" in p['name'].upper()]
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Tokens détectés")
-        if nvda_tokens:
-            st.json(nvda_tokens)
-        else:
-            st.write("Aucun token NVDA.")
-            
-    with col2:
-        st.subheader("Marchés (Pairs) détectés")
-        if nvda_pairs:
-            st.success(f"Marchés trouvés : {nvda_pairs}")
-        else:
-            st.write("Aucune paire NVDA.")
-except Exception as e:
-    st.error(f"Erreur Spot Meta : {e}")
-
-# --- ÉTAPE 3 : PRIX EN TEMPS RÉEL ---
-st.header("3. Vérification des prix (All Mids)")
-try:
+# --- RÉCUPÉRATION DES PRIX ET NOMS ---
+@st.cache_data(ttl=10)
+def fetch_hip3_data():
+    # On récupère tous les prix (le dictionnaire all_mids contient TOUT, même HIP-3)
     all_prices = info.all_mids()
-    # On cherche toutes les clés qui contiennent NVDA
-    nvda_prices = {k: v for k, v in all_prices.items() if "NVDA" in k.upper()}
     
-    if nvda_prices:
-        st.write("Prix détectés pour :")
-        st.json(nvda_prices)
-    else:
-        st.warning("L'API 'all_mids' ne renvoie aucun prix contenant le texte 'NVDA'.")
-except Exception as e:
-    st.error(f"Erreur All Mids : {e}")
+    # On filtre les actifs HIP-3 (format ISSUER:ASSET)
+    hip3_tickers = [t for t in all_prices.keys() if ":" in t]
+    
+    return all_prices, hip3_tickers
 
-# --- ÉTAPE 4 : LISTE BRUTE DES 50 PREMIERS (POUR VOIR LE FORMAT) ---
-with st.expander("Voir le format des 50 premiers actifs de l'échange"):
-    if 'all_prices' in locals() and all_prices:
-        st.write(list(all_prices.keys())[:50])
+prices, hip3_list = fetch_hip3_data()
+
+# --- INTERFACE ---
+st.sidebar.header("Scan HIP-3")
+if not hip3_list:
+    st.sidebar.warning("Aucun actif avec ':' détecté. Tentative de scan par mots clés...")
+    # Fallback : scanne tout ce qui contient NVDA ou HOOD
+    hip3_list = [t for t in prices.keys() if any(x in t for x in ["NVDA", "HOOD", "TSLA", "AAPL"])]
+
+search = st.sidebar.text_input("Filtrer un stock (ex: NVDA)", "NVDA").upper()
+filtered_hip3 = [t for t in hip3_list if search in t]
+
+# --- LOGIQUE DE COMPARAISON ---
+st.subheader(f"Résultats pour : {search}")
+
+if filtered_hip3:
+    # On essaie de grouper les paires par actif (ex: trouver toutes les déclinaisons de NVDA)
+    # Les noms ressemblent à : 'XYZ:NVDA-USDH', 'XYZ:NVDA-USDT', etc.
+    data = []
+    for ticker in filtered_hip3:
+        data.append({
+            "Ticker Complet": ticker,
+            "Prix Actuel": float(prices.get(ticker, 0)),
+        })
+    
+    df = pd.DataFrame(data)
+    st.table(df)
+    
+    # Tentative d'arbitrage automatique
+    if len(df) >= 2:
+        st.info("💡 Plusieurs paires détectées pour cet actif. Calcul du spread...")
+        # On compare la paire la moins chère et la plus chère
+        df['Prix Actuel'] = df['Prix Actuel'].astype(float)
+        p_min = df['Prix Actuel'].min()
+        p_max = df['Prix Actuel'].max()
+        t_min = df.loc[df['Prix Actuel'].idxmin(), 'Ticker Complet']
+        t_max = df.loc[df['Prix Actuel'].idxmax(), 'Ticker Complet']
+        
+        spread_pct = ((p_max - p_min) / p_min) * 100
+        
+        c1, c2 = st.columns(2)
+        c1.metric("Spread Détecté", f"{spread_pct:.4f}%")
+        c1.write(f"Acheter: `{t_min}` / Vendre: `{t_max}`")
+        
+        # Funding (Optionnel - si disponible)
+        if st.button("Récupérer Funding Rates"):
+            for t in [t_min, t_max]:
+                try:
+                    f = info.funding_history(t, int(time.time()*1000)-3600000, int(time.time()*1000))
+                    st.write(f"Funding {t} : **{float(f[0]['fundingRate']):.6%}**")
+                except:
+                    st.write(f"Funding non disponible pour {t}")
+else:
+    st.error("Aucun actif trouvé. Essaie de chercher '@' ou de regarder la liste brute ci-dessous.")
+    with st.expander("Voir TOUS les tickers de l'échange"):
+        st.write(list(prices.keys()))
