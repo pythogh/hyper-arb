@@ -1,11 +1,14 @@
 import streamlit as st
 import pandas as pd
+import time
 from hyperliquid.info import Info
+import plotly.graph_objects as go
 
-# --- CONFIG ---
-st.set_page_config(page_title="HL TradFi Discovery", layout="wide")
-st.title("🏛️ Arbitrage TradFi (HIP-3 Indexé)")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Hyperliquid HIP-3 Arb", layout="wide")
+st.title("🏛️ Arbitrage TradFi (HIP-3 Specialists)")
 
+# Initialisation de l'API
 BASE_URL = "https://api.hyperliquid.xyz"
 @st.cache_resource
 def init_info():
@@ -13,70 +16,104 @@ def init_info():
 
 info = init_info()
 
-# --- STEP 1 : MAPPING ID -> NOM ---
-@st.cache_data(ttl=3600)
-def get_token_mapping():
-    try:
-        spot_meta = info.spot_meta()
-        tokens = spot_meta.get('tokens', [])
-        # On crée un dictionnaire { "@1": "NOM_REEL", ... }
-        mapping = { f"@{t['index']}": t['name'] for t in tokens }
-        # On garde aussi le nom complet si dispo
-        full_names = { f"@{t['index']}": t.get('fullName', t['name']) for t in tokens }
-        return mapping, full_names
-    except:
-        return {}, {}
+# --- MAPPING MANUEL (Basé sur tes logs) ---
+# On utilise tes IDs vérifiés pour garantir l'affichage
+ID_MAP = {
+    "@401": "QONE", "@402": "US", "@403": "UMEGA", "@404": "XMR1",
+    "@405": "HMT", "@406": "PEUR", "@407": "TSLA", "@408": "NVDA",
+    "@409": "CRCL", "@410": "SOON", "@411": "SLV", "@412": "GOOGL"
+}
 
-# --- STEP 2 : CALCUL ARBITRAGE ---
-mapping, full_names = get_token_mapping()
-all_prices = info.all_mids()
-
-# On organise les données par Actif de Base
-# Structure : { "@1": {"USDC": 150.2, "USDT": 150.5}, ... }
-arb_table = {}
-
-for ticker, price in all_prices.items():
-    if ticker.startswith("@"):
-        parts = ticker.split("/")
-        base_id = parts[0]
-        quote = parts[1] if len(parts) > 1 else "USDC" # Par défaut USDC
+# --- RÉCUPÉRATION DES DONNÉES ---
+@st.cache_data(ttl=5)
+def get_arb_data():
+    all_prices = info.all_mids()
+    
+    # Structure pour regrouper les prix : { "NVDA": {"USDC": 120, "USDT": 121}, ... }
+    organized_data = {}
+    
+    for ticker, price in all_prices.items():
+        # On cherche les IDs qui sont dans notre map (ex: @408)
+        # Le format peut être "@408", "@408/USDC", "@408/USDT", "@408/USDH"
+        base_id = ticker.split('/')[0]
         
-        if base_id not in arb_table:
-            arb_table[base_id] = {}
-        
-        arb_table[base_id][quote] = float(price)
-
-# --- AFFICHAGE ---
-data_rows = []
-for base_id, quotes in arb_table.items():
-    if len(quotes) > 1: # On ne garde que s'il y a au moins 2 prix à comparer
-        real_name = mapping.get(base_id, base_id)
-        full_name = full_names.get(base_id, "")
-        
-        row = {
-            "ID": base_id,
-            "Nom": real_name,
-            "Description": full_name
-        }
-        # On ajoute les colonnes dynamiquement pour chaque quote trouvée
-        for q, p in quotes.items():
-            row[q] = p
+        if base_id in ID_MAP:
+            name = ID_MAP[base_id]
+            quote = ticker.split('/')[1] if '/' in ticker else "USDC"
             
-        # Calcul du spread max si on a USDC et une autre
-        if "USDC" in quotes:
-            other_quotes = [q for q in quotes.keys() if q != "USDC"]
-            if other_quotes:
-                target_q = other_quotes[0]
-                spread = ((quotes[target_q] - quotes["USDC"]) / quotes["USDC"]) * 100
-                row["Spread % (vs USDC)"] = round(spread, 4)
-        
-        data_rows.append(row)
+            if name not in organized_data:
+                organized_data[name] = {"ID": base_id}
+            
+            organized_data[name][quote] = float(price)
+            
+    return organized_data
 
-if data_rows:
-    df = pd.DataFrame(data_rows)
-    st.subheader("Opportunités d'Arbitrage Détectées")
-    st.dataframe(df.style.background_gradient(subset=["Spread % (vs USDC)"], cmap="RdYlGn_r"), use_container_width=True)
+# --- LOGIQUE D'AFFICHAGE ---
+organized_prices = get_arb_data()
+
+st.sidebar.header("Paramètres")
+selected_stable = st.sidebar.selectbox("Comparer USDC contre :", ["USDT", "USDH", "USDS"])
+auto_refresh = st.sidebar.checkbox("Auto-refresh (5s)", value=True)
+
+if auto_refresh:
+    time.sleep(5)
+    st.rerun()
+
+# Calcul des spreads
+rows = []
+for name, quotes in organized_prices.items():
+    p_usdc = quotes.get("USDC")
+    p_target = quotes.get(selected_stable)
+    
+    if p_usdc and p_target:
+        spread_abs = p_target - p_usdc
+        spread_pct = (spread_abs / p_usdc) * 100
+        
+        rows.append({
+            "Action": name,
+            "ID": quotes["ID"],
+            "Prix USDC": round(p_usdc, 3),
+            f"Prix {selected_stable}": round(p_target, 3),
+            "Spread ($)": round(spread_abs, 3),
+            "Spread (%)": round(spread_pct, 4)
+        })
+
+# --- RENDU ---
+if rows:
+    df = pd.DataFrame(rows)
+    
+    # Métriques en haut
+    top_cols = st.columns(min(len(df), 4))
+    for i, row in df.head(4).iterrows():
+        top_cols[i].metric(
+            row['Action'], 
+            f"${row['Prix USDC']}", 
+            f"{row['Spread (%)']}%",
+            delta_color="normal" if row['Spread (%)'] > 0 else "inverse"
+        )
+
+    st.write("---")
+    st.subheader(f"Tableau de bord : USDC vs {selected_stable}")
+    
+    # Style conditionnel pour les spreads importants
+    st.dataframe(
+        df.style.background_gradient(subset=['Spread (%)'], cmap='RdYlGn_r'),
+        use_container_width=True
+    )
+
+    # Graphique de comparaison
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=df['Action'], y=df['Spread (%)'], name='Spread %', marker_color='royalblue'))
+    fig.update_layout(
+        title=f"Écart de prix relatif (USDC vs {selected_stable})",
+        yaxis_title="Spread %",
+        template="plotly_dark"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
 else:
-    st.warning("Aucun arbitrage multi-quote trouvé pour le moment.")
-    with st.expander("Voir tous les IDs HIP-3 détectés"):
-        st.write(mapping)
+    st.warning(f"Aucune paire double (USDC + {selected_stable}) détectée pour le moment.")
+    st.info("💡 Conseil : Si l'interface reste vide, vérifie que les paires USDT/USDH sont actives sur l'exchange pour les IDs listés.")
+
+with st.expander("🔍 Debug : Données brutes reçues"):
+    st.json(organized_prices)
