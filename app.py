@@ -4,10 +4,13 @@ import json
 url = "https://api.hyperliquid.xyz/info"
 
 payload = {
-    "type": "l2Book",
-    "coin": "xyz:NVDA"
+    "type": "allMids"
 }
 
 r = requests.post(url, json=payload)
 
-print(r.json())
+data = r.json()
+
+for coin in data:
+    if "NVDA" in coin:
+        print(coin, data[coin])
