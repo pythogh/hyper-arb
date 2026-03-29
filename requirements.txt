@@ -2,3 +2,4 @@ streamlit
 pandas
 hyperliquid-python-sdk
 plotly
+requests
