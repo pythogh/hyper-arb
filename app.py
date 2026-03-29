@@ -3,8 +3,8 @@ import pandas as pd
 from hyperliquid.info import Info
 
 # --- CONFIG ---
-st.set_page_config(page_title="HL HIP-3 Scanner", layout="wide")
-st.title("🏛️ Scanner Final : Actifs TradFi HIP-3")
+st.set_page_config(page_title="HL HIP-3 Specialist", layout="wide")
+st.title("🏛️ Hyperliquid HIP-3 (TradFi) Specialist")
 
 BASE_URL = "https://api.hyperliquid.xyz"
 @st.cache_resource
@@ -15,64 +15,74 @@ info = init_info()
 
 # --- RÉCUPÉRATION ---
 try:
-    # 1. On récupère les METADONNÉES du SPOT (C'est là que sont les stocks)
-    spot_meta = info.spot_meta()
-    tokens = spot_meta.get('tokens', [])
-    universe = spot_meta.get('universe', [])
+    # 1. On récupère TOUS les prix du registre
+    all_prices = info.all_mids()
     
-    # 2. On crée un dictionnaire : Index du Token -> Nom (ex: 41 -> NVDA)
-    # On cherche aussi le nom complet (fullName) pour être sûr
-    token_map = {t['index']: t['name'] for t in tokens}
-    full_name_map = {t['index']: t.get('fullName', t['name']) for t in tokens}
+    # 2. On filtre uniquement les actifs qui ont un ":" (Signature HIP-3 / TradeXYZ)
+    # Et on sépare le Builder du Ticker
+    hip3_data = []
+    for ticker, price in all_prices.items():
+        if ":" in ticker:
+            # Format attendu : "BUILDER:SYMBOL/QUOTE"
+            try:
+                parts = ticker.split(":")
+                builder = parts[0]
+                rest = parts[1]
+                
+                # On sépare le symbole de la quote (USDC, USDT, USDH)
+                if "/" in rest:
+                    symbol, quote = rest.split("/")
+                else:
+                    symbol, quote = rest, "Unknown"
+                
+                hip3_data.append({
+                    "Full Ticker": ticker,
+                    "Builder": builder,
+                    "Asset": symbol,
+                    "Quote": quote,
+                    "Price": float(price)
+                })
+            except:
+                continue
 
-    # 3. On reconstruit les paires de trading réelles
-    active_pairs = []
-    for pair in universe:
-        base_id = pair['tokens'][0]
-        quote_id = pair['tokens'][1]
+    if hip3_data:
+        df = pd.DataFrame(hip3_data)
         
-        base_name = token_map.get(base_id, "Unknown")
-        quote_name = token_map.get(quote_id, "Unknown")
+        # --- INTERFACE ---
+        st.subheader("Marchés TradFi (HIP-3) Détectés")
         
-        active_pairs.append({
-            "Pair Name": pair['name'],
-            "Base Asset": base_name,
-            "Quote (Stable)": quote_name,
-            "Full Name": full_name_map.get(base_id, ""),
-            "Pair Index": pair['index']
-        })
-
-    df_pairs = pd.DataFrame(active_pairs)
-
-    # --- FILTRAGE TRADFI ---
-    # On cherche tout ce qui ressemble à une action (NVDA, HOOD, etc.)
-    search = st.text_input("Rechercher un stock (ex: NVDA, HOOD) :", "").upper()
-    
-    if search:
-        filtered = df_pairs[df_pairs['Full Name'].str.contains(search) | df_pairs['Base Asset'].str.contains(search)]
-    else:
-        filtered = df_pairs
-
-    st.subheader("Paires de trading détectées sur le Spot")
-    st.dataframe(filtered, use_container_width=True)
-
-    # --- ÉTAPE FINALE : RÉCUPÉRATION DES PRIX ---
-    if not filtered.empty:
+        # Filtre par Builder
+        builders = df['Builder'].unique()
+        selected_builder = st.sidebar.multiselect("Filtrer par Builder", builders, default=builders)
+        
+        # Filtre par Actif
+        assets = df['Asset'].unique()
+        selected_assets = st.sidebar.multiselect("Filtrer par Action (NVDA, HOOD...)", assets, default=assets[:5] if len(assets) > 5 else assets)
+        
+        mask = df['Builder'].isin(selected_builder) & df['Asset'].isin(selected_assets)
+        filtered_df = df[mask]
+        
+        st.dataframe(filtered_df, use_container_width=True)
+        
+        # --- LOGIQUE D'ARBITRAGE ---
         st.write("---")
-        st.subheader("Prix en temps réel pour ces paires")
-        all_prices = info.all_mids()
+        st.subheader("Opportunités d'Arbitrage")
         
-        price_data = []
-        for _, row in filtered.iterrows():
-            p_name = row['Pair Name']
-            price = all_prices.get(p_name, "N/A")
-            price_data.append({"Paire": p_name, "Prix": price})
-        
-        st.table(pd.DataFrame(price_data))
+        # On groupe par Asset pour trouver les différences de prix entre Quotes
+        for asset in selected_assets:
+            asset_group = filtered_df[filtered_df['Asset'] == asset]
+            if len(asset_group) > 1:
+                st.write(f"📊 Analyse pour **{asset}** :")
+                st.table(asset_group[['Quote', 'Price']])
+                
+                p_min = asset_group['Price'].min()
+                p_max = asset_group['Price'].max()
+                spread = ((p_max - p_min) / p_min) * 100
+                st.info(f"Spread max détecté sur {asset} : **{spread:.4f}%**")
+    else:
+        st.warning("Aucun actif HIP-3 (avec ':') n'a été trouvé.")
+        with st.expander("Voir les 50 premiers tickers bruts pour analyse"):
+            st.write(list(all_prices.keys())[:50])
 
 except Exception as e:
-    st.error(f"Erreur lors de l'accès au Spot Meta : {e}")
-
-if st.button("🔄 Rafraîchir"):
-    st.cache_data.clear()
-    st.rerun()
+    st.error(f"Erreur lors de la lecture des données : {e}")
