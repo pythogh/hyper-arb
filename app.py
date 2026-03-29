@@ -1,119 +1,88 @@
 import streamlit as st
 import pandas as pd
-import time
 from hyperliquid.info import Info
-import plotly.graph_objects as go
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="Hyperliquid HIP-3 Arb", layout="wide")
-st.title("🏛️ Arbitrage TradFi (HIP-3 Specialists)")
+# --- CONFIG ---
+st.set_page_config(page_title="HL Fast Arb", layout="wide")
+st.title("⚡ Hyperliquid Fast TradFi Scout")
 
-# Initialisation de l'API
+# Initialisation simple
 BASE_URL = "https://api.hyperliquid.xyz"
 @st.cache_resource
-def init_info():
+def get_api():
     return Info(BASE_URL)
 
-info = init_info()
+info = get_api()
 
-# --- MAPPING MANUEL (Basé sur tes logs) ---
-# On utilise tes IDs vérifiés pour garantir l'affichage
+# Mapping des IDs que TU as trouvé dans les logs
 ID_MAP = {
-    "@401": "QONE", "@402": "US", "@403": "UMEGA", "@404": "XMR1",
-    "@405": "HMT", "@406": "PEUR", "@407": "TSLA", "@408": "NVDA",
-    "@409": "CRCL", "@410": "SOON", "@411": "SLV", "@412": "GOOGL"
+    "@407": "TSLA",
+    "@408": "NVDA",
+    "@412": "GOOGL",
+    "@411": "SLV"
 }
 
-# --- RÉCUPÉRATION DES DONNÉES ---
-@st.cache_data(ttl=5)
-def get_arb_data():
-    all_prices = info.all_mids()
+# --- RÉCUPÉRATION CIBLÉE ---
+def fetch_data():
+    try:
+        # On récupère TOUS les prix une seule fois
+        with st.spinner("Récupération des prix en cours..."):
+            all_mids = info.all_mids()
+        return all_mids
+    except Exception as e:
+        st.error(f"Erreur de connexion API : {e}")
+        return None
+
+prices = fetch_data()
+
+if prices:
+    st.success("Connexion API établie.")
     
-    # Structure pour regrouper les prix : { "NVDA": {"USDC": 120, "USDT": 121}, ... }
-    organized_data = {}
-    
-    for ticker, price in all_prices.items():
-        # On cherche les IDs qui sont dans notre map (ex: @408)
-        # Le format peut être "@408", "@408/USDC", "@408/USDT", "@408/USDH"
-        base_id = ticker.split('/')[0]
+    results = []
+    # On boucle uniquement sur nos stocks cibles
+    for asset_id, name in ID_MAP.items():
+        # On cherche manuellement les paires dans le dictionnaire
+        # Hyperliquid utilise souvent / ou rien
+        p_usdc = float(prices.get(asset_id, 0))
+        p_usdt = float(prices.get(f"{asset_id}/USDT", 0))
+        p_usdh = float(prices.get(f"{asset_id}/USDH", 0))
         
-        if base_id in ID_MAP:
-            name = ID_MAP[base_id]
-            quote = ticker.split('/')[1] if '/' in ticker else "USDC"
-            
-            if name not in organized_data:
-                organized_data[name] = {"ID": base_id}
-            
-            organized_data[name][quote] = float(price)
-            
-    return organized_data
+        # On n'ajoute que si on a au moins l'USDC et un autre
+        if p_usdc > 0:
+            results.append({
+                "Action": name,
+                "ID": asset_id,
+                "USDC": p_usdc,
+                "USDT": p_usdt if p_usdt > 0 else "N/A",
+                "USDH": p_usdh if p_usdh > 0 else "N/A"
+            })
 
-# --- LOGIQUE D'AFFICHAGE ---
-organized_prices = get_arb_data()
-
-st.sidebar.header("Paramètres")
-selected_stable = st.sidebar.selectbox("Comparer USDC contre :", ["USDT", "USDH", "USDS"])
-auto_refresh = st.sidebar.checkbox("Auto-refresh (5s)", value=True)
-
-if auto_refresh:
-    time.sleep(5)
-    st.rerun()
-
-# Calcul des spreads
-rows = []
-for name, quotes in organized_prices.items():
-    p_usdc = quotes.get("USDC")
-    p_target = quotes.get(selected_stable)
-    
-    if p_usdc and p_target:
-        spread_abs = p_target - p_usdc
-        spread_pct = (spread_abs / p_usdc) * 100
+    if results:
+        df = pd.DataFrame(results)
         
-        rows.append({
-            "Action": name,
-            "ID": quotes["ID"],
-            "Prix USDC": round(p_usdc, 3),
-            f"Prix {selected_stable}": round(p_target, 3),
-            "Spread ($)": round(spread_abs, 3),
-            "Spread (%)": round(spread_pct, 4)
-        })
+        # Calcul du spread USDT vs USDC pour l'exemple
+        def calc_spread(row):
+            try:
+                if row['USDT'] != "N/A":
+                    return round(((row['USDT'] - row['USDC']) / row['USDC']) * 100, 4)
+            except:
+                pass
+            return 0.0
 
-# --- RENDU ---
-if rows:
-    df = pd.DataFrame(rows)
-    
-    # Métriques en haut
-    top_cols = st.columns(min(len(df), 4))
-    for i, row in df.head(4).iterrows():
-        top_cols[i].metric(
-            row['Action'], 
-            f"${row['Prix USDC']}", 
-            f"{row['Spread (%)']}%",
-            delta_color="normal" if row['Spread (%)'] > 0 else "inverse"
-        )
+        df['Spread USDT %'] = df.apply(calc_spread, axis=1)
+        
+        st.subheader("Tableau des Spreads")
+        st.table(df)
+        
+    else:
+        st.warning("Prix USDC introuvables pour ces IDs. Vérifie le format dans le debug ci-dessous.")
 
-    st.write("---")
-    st.subheader(f"Tableau de bord : USDC vs {selected_stable}")
-    
-    # Style conditionnel pour les spreads importants
-    st.dataframe(
-        df.style.background_gradient(subset=['Spread (%)'], cmap='RdYlGn_r'),
-        use_container_width=True
-    )
-
-    # Graphique de comparaison
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=df['Action'], y=df['Spread (%)'], name='Spread %', marker_color='royalblue'))
-    fig.update_layout(
-        title=f"Écart de prix relatif (USDC vs {selected_stable})",
-        yaxis_title="Spread %",
-        template="plotly_dark"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
+    # --- DEBUG SIMPLE ---
+    with st.expander("🛠️ DEBUG : Voir les 20 premières clés de l'API"):
+        st.write(list(prices.keys())[:20])
 else:
-    st.warning(f"Aucune paire double (USDC + {selected_stable}) détectée pour le moment.")
-    st.info("💡 Conseil : Si l'interface reste vide, vérifie que les paires USDT/USDH sont actives sur l'exchange pour les IDs listés.")
+    st.error("Impossible de joindre l'API. Vérifie ta connexion internet ou si Hyperliquid est en maintenance.")
 
-with st.expander("🔍 Debug : Données brutes reçues"):
-    st.json(organized_prices)
+if st.button("🔄 Rafraîchir Manuellement"):
+    st.cache_data.clear()
+    st.rerun()
