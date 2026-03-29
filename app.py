@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
+import time
 from hyperliquid.info import Info
 
-# --- CONFIG ---
-st.set_page_config(page_title="HL HIP-3 Spot Scanner", layout="wide")
-st.title("🏛️ Scanner de Prix Spot HIP-3 (TradFi)")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="HL Multi-Deployer Scout", layout="wide")
+st.title("🌐 Hyperliquid HIP-3 Multi-Deployer Scout")
+st.markdown("_TradeXYZ (USDC) | Dreamcash (USDT) | Kinetiq (USDH)_")
 
 BASE_URL = "https://api.hyperliquid.xyz"
 @st.cache_resource
@@ -13,69 +15,95 @@ def get_api():
 
 info = get_api()
 
-def fetch_hip3_spot_data():
+def fetch_comprehensive_data():
     try:
-        # Cet endpoint renvoie Metadata + Prix (Asset Contexts)
-        data = info.spot_meta_and_asset_ctxs()
-        universe = data[0]['universe'] # Liste des paires
-        tokens = data[0]['tokens']     # Liste des actifs
-        ctxs = data[1]                 # Liste des prix et stats
+        # web_data2 est l'appel le plus complet utilisé par l'UI officielle
+        # Il contient les "extra" assets du HIP-3
+        data = info.web_data2("0x0000000000000000000000000000000000000000") # Adresse nulle pour les données globales
         
-        # 1. Mapping ID -> Nom (ex: 408 -> NVDA)
-        token_map = {t['index']: t['name'] for t in tokens}
+        # Extraction des contextes d'actifs (Asset Contexts)
+        # C'est ici que les prix des différents déployeurs sont agrégés
+        all_assets = data.get('assetCtxs', [])
+        meta = data.get('meta', {}).get('universe', [])
         
-        # 2. Construction du tableau des prix
+        # Mapping Index -> Nom via l'univers du web_data
+        mapping = {i: asset['name'] for i, asset in enumerate(meta)}
+        
         rows = []
-        for i, pair in enumerate(universe):
-            pair_name = pair['name'] # ex: "@408/USDT"
-            base_token_id = pair['tokens'][0]
-            quote_token_id = pair['tokens'][1]
+        for i, ctx in enumerate(all_assets):
+            name = mapping.get(i, f"Unknown_{i}")
             
-            base_symbol = token_map.get(base_token_id, f"@{base_token_id}")
-            quote_symbol = token_map.get(quote_token_id, f"@{quote_token_id}")
+            # Dans web_data2, le prix mid est souvent dans 'midSz' ou calculé via bid/ask
+            # On cherche les infos spécifiques aux HIP-3
+            mid_price = ctx.get('midSz')
             
-            # Le prix est dans le context à l'index correspondant
-            price = "N/A"
-            if i < len(ctxs):
-                price = float(ctxs[i]['mid_sz']) if ctxs[i]['mid_sz'] else "N/A"
-            
+            # On identifie le déployeur par le nom du ticker (ex: XYZ:NVDA)
+            # ou par la structure du nom si elle contient le stable
             rows.append({
-                "Paire": pair_name,
-                "Actif": base_symbol,
-                "Stable": quote_symbol,
-                "Prix": price
+                "Ticker": name,
+                "Prix": float(mid_price) if mid_price else None,
+                "Daily Vol": ctx.get('dayNtlVlm', 0),
+                "Funding": ctx.get('funding', 0)
             })
         return rows
     except Exception as e:
-        st.error(f"Erreur API Spot : {e}")
+        st.error(f"Erreur web_data2 : {e}")
+        # Si web_data2 échoue, on tente une approche brute par le mapping ID
         return []
 
-data = fetch_hip3_spot_data()
+# --- MAPPING MANUEL DES IDS HIP-3 ---
+# Puisque tu as confirmé les IDs (408 = NVDA, etc.)
+ID_MAP = {
+    "407": "TSLA",
+    "408": "NVDA",
+    "412": "GOOGL",
+    "411": "SLV"
+}
 
-if data:
-    df = pd.DataFrame(data)
+data_rows = fetch_comprehensive_data()
+
+if data_rows:
+    df_all = pd.DataFrame(data_rows)
     
-    # Filtrage sur tes IDs cibles (407, 408, etc.)
-    target_ids = ["407", "408", "412"]
-    filtered_df = df[df['Paire'].str.contains('|'.join(target_ids))]
-
-    st.subheader("📊 Prix Spot Détectés (Moteur HIP-3)")
-    if not filtered_df.empty:
-        st.table(filtered_df)
+    # Filtrage intelligent
+    # On cherche les lignes qui contiennent nos IDs cibles ou les noms des actions
+    st.subheader("📊 Marchés Détectés par Déployeur")
+    
+    # On crée des colonnes virtuelles pour l'arbitrage
+    arb_results = []
+    
+    for asset_id, stock_name in ID_MAP.items():
+        # On cherche toutes les déclinaisons de cet ID (ex: @408, XYZ:NVDA, etc.)
+        # Selon le déployeur, le nom varie
+        matches = df_all[df_all['Ticker'].str.contains(asset_id) | df_all['Ticker'].str.contains(stock_name)]
         
-        # --- ANALYSE D'ARBITRAGE ---
-        st.write("---")
-        st.subheader("💡 Analyse d'Arbitrage Rapide")
-        # On regroupe par actif pour voir les écarts entre USDC/USDT/USDH
-        for asset in filtered_df['Actif'].unique():
-            asset_rows = filtered_df[filtered_df['Actif'] == asset]
-            if len(asset_rows) > 1:
-                st.write(f"Comparaison pour **{asset}** :")
-                st.dataframe(asset_rows[['Stable', 'Prix']], use_container_width=True)
-    else:
-        st.warning("Aucune des paires cibles n'a été trouvée dans le Spot Universe.")
-        st.write("Voici TOUTES les paires Spot détectées :", df)
-else:
-    st.info("Aucune donnée Spot reçue.")
+        if not matches.empty:
+            arb_entry = {"Stock": stock_name, "ID": asset_id}
+            for _, match in matches.iterrows():
+                t = match['Ticker']
+                p = match['Prix']
+                # Identification de la quote/déployeur par le suffixe ou préfixe
+                if "USDT" in t or "Cash" in t:
+                    arb_entry["USDT (Dreamcash)"] = p
+                elif "USDH" in t or "km" in t:
+                    arb_entry["USDH (Kinetiq)"] = p
+                else:
+                    arb_entry["USDC (TradeXYZ)"] = p
+            arb_results.append(arb_entry)
 
-st.button("🔄 Rafraîchir")
+    if arb_results:
+        df_arb = pd.DataFrame(arb_results)
+        st.write("### Comparaison Inter-Déployeurs")
+        st.table(df_arb)
+        
+        # Calcul du spread si possible
+        if "USDC (TradeXYZ)" in df_arb.columns and "USDT (Dreamcash)" in df_arb.columns:
+            st.info("💡 Spread détecté entre TradeXYZ et Dreamcash")
+    else:
+        st.warning("Aucune correspondance trouvée pour les IDs TradFi. Les marchés sont peut-être listés sous des noms de 'Vaults'.")
+        with st.expander("Voir tous les tickers bruts détectés"):
+            st.write(df_all['Ticker'].tolist())
+else:
+    st.error("Impossible de récupérer les données globales.")
+
+st.button("🔄 Scanner l'EVM")
