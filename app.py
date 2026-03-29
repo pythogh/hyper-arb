@@ -1,16 +1,10 @@
 import requests
-import json
 
-url = "https://api.hyperliquid.xyz/info"
+r = requests.post(
+    "https://api.hyperliquid.xyz/info",
+    headers={"Content-Type": "application/json"},
+    json={"type": "allMids"}
+)
 
-payload = {
-    "type": "allMids"
-}
-
-r = requests.post(url, json=payload)
-
-data = r.json()
-
-for coin in data:
-    if "NVDA" in coin:
-        print(coin, data[coin])
+print("status:", r.status_code)
+print(r.text[:1000])
