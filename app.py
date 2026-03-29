@@ -3,10 +3,9 @@ import pandas as pd
 from hyperliquid.info import Info
 
 # --- CONFIG ---
-st.set_page_config(page_title="HL Fast Arb", layout="wide")
-st.title("⚡ Hyperliquid Fast TradFi Scout")
+st.set_page_config(page_title="HL Ultimate Finder", layout="wide")
+st.title("🕵️ Le Détective Hyperliquid (HIP-3)")
 
-# Initialisation simple
 BASE_URL = "https://api.hyperliquid.xyz"
 @st.cache_resource
 def get_api():
@@ -14,75 +13,50 @@ def get_api():
 
 info = get_api()
 
-# Mapping des IDs que TU as trouvé dans les logs
-ID_MAP = {
-    "@407": "TSLA",
-    "@408": "NVDA",
-    "@412": "GOOGL",
-    "@411": "SLV"
-}
+# Tes IDs cibles
+TARGET_IDS = ["407", "408", "412", "411"] 
+# (On enlève le @ pour faire une recherche textuelle large)
 
-# --- RÉCUPÉRATION CIBLÉE ---
 def fetch_data():
     try:
-        # On récupère TOUS les prix une seule fois
-        with st.spinner("Récupération des prix en cours..."):
-            all_mids = info.all_mids()
-        return all_mids
+        return info.all_mids()
     except Exception as e:
-        st.error(f"Erreur de connexion API : {e}")
-        return None
+        st.error(f"Erreur API : {e}")
+        return {}
 
 prices = fetch_data()
 
 if prices:
-    st.success("Connexion API établie.")
+    st.success(f"API Connectée - {len(prices)} actifs trouvés.")
     
-    results = []
-    # On boucle uniquement sur nos stocks cibles
-    for asset_id, name in ID_MAP.items():
-        # On cherche manuellement les paires dans le dictionnaire
-        # Hyperliquid utilise souvent / ou rien
-        p_usdc = float(prices.get(asset_id, 0))
-        p_usdt = float(prices.get(f"{asset_id}/USDT", 0))
-        p_usdh = float(prices.get(f"{asset_id}/USDH", 0))
+    all_keys = list(prices.keys())
+    found_data = []
+
+    for tid in TARGET_IDS:
+        # On cherche toutes les clés qui contiennent ce numéro (ex: "408")
+        matches = [k for k in all_keys if tid in k]
         
-        # On n'ajoute que si on a au moins l'USDC et un autre
-        if p_usdc > 0:
-            results.append({
-                "Action": name,
-                "ID": asset_id,
-                "USDC": p_usdc,
-                "USDT": p_usdt if p_usdt > 0 else "N/A",
-                "USDH": p_usdh if p_usdh > 0 else "N/A"
+        for m in matches:
+            found_data.append({
+                "ID Recherché": tid,
+                "Clé Réelle (Ticker)": m,
+                "Prix": float(prices[m])
             })
 
-    if results:
-        df = pd.DataFrame(results)
-        
-        # Calcul du spread USDT vs USDC pour l'exemple
-        def calc_spread(row):
-            try:
-                if row['USDT'] != "N/A":
-                    return round(((row['USDT'] - row['USDC']) / row['USDC']) * 100, 4)
-            except:
-                pass
-            return 0.0
-
-        df['Spread USDT %'] = df.apply(calc_spread, axis=1)
-        
-        st.subheader("Tableau des Spreads")
+    if found_data:
+        df = pd.DataFrame(found_data)
+        st.subheader("🎯 Correspondances trouvées dans l'API")
         st.table(df)
         
+        # Petit outil d'analyse de spread automatique
+        if len(df) > 1:
+            st.info("💡 Pour arbitrer : comparez les prix des clés ayant le même ID mais des suffixes différents (ex: /USDC vs /USDT).")
     else:
-        st.warning("Prix USDC introuvables pour ces IDs. Vérifie le format dans le debug ci-dessous.")
-
-    # --- DEBUG SIMPLE ---
-    with st.expander("🛠️ DEBUG : Voir les 20 premières clés de l'API"):
-        st.write(list(prices.keys())[:20])
+        st.warning("Aucune clé contenant ces IDs n'a été trouvée dans 'all_mids'.")
+        with st.expander("🧐 Inspecter les 100 premières clés brutes pour trouver le format"):
+            st.write(all_keys[:100])
+            
 else:
-    st.error("Impossible de joindre l'API. Vérifie ta connexion internet ou si Hyperliquid est en maintenance.")
+    st.error("Aucune donnée reçue de l'API.")
 
-if st.button("🔄 Rafraîchir Manuellement"):
-    st.cache_data.clear()
-    st.rerun()
+st.button("🔄 Scanner à nouveau")
