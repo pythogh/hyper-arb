@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
-import time
 from hyperliquid.info import Info
-import plotly.graph_objects as go
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="HL HIP-3 Scanner", layout="wide")
-st.title("🏛️ Hyperliquid HIP-3 (TradFi) Scanner")
+st.set_page_config(page_title="HL NVDA Debugger", layout="wide")
+st.title("🔍 Recherche de 'NVDA' sur Hyperliquid")
 
 BASE_URL = "https://api.hyperliquid.xyz"
 @st.cache_resource
@@ -15,88 +13,71 @@ def init_info():
 
 info = init_info()
 
-# --- RÉCUPÉRATION DES ASSETS SPOT (HIP-3) ---
-@st.cache_data(ttl=60)
-def get_hip3_metadata():
-    try:
-        # C'est ICI que se trouvent les stocks !
-        spot_meta = info.spot_meta()
-        universe = spot_meta.get('universe', [])
-        tokens = spot_meta.get('tokens', [])
-        
-        # On crée un mapping ID -> Nom (ex: 41 -> @NVDA)
-        token_map = {t['index']: t['name'] for t in tokens}
-        
-        # On cherche les paires de trading (ex: @NVDA/USDC, @NVDA/USDT)
-        pairs = []
-        for pair in universe:
-            # pair['tokens'] contient les IDs des deux tokens de la paire
-            t1 = token_map.get(pair['tokens'][0])
-            t2 = token_map.get(pair['tokens'][1])
-            pairs.append({
-                "name": pair['name'], # ex: "@1/USDC"
-                "base": t1,           # ex: "@1"
-                "quote": t2,          # ex: "USDC"
-                "pair_index": pair['index']
-            })
-        return pairs
-    except Exception as e:
-        st.error(f"Erreur lors de la lecture du Spot Meta : {e}")
-        return []
-
-# --- RÉCUPÉRATION DES PRIX SPOT ---
-@st.cache_data(ttl=10)
-def get_spot_prices():
-    try:
-        # Pour le spot, l'endpoint peut différer de all_mids()
-        # On utilise souvent l'état complet du registre spot
-        return info.all_mids() 
-    except:
-        return {}
-
-# --- LOGIQUE D'ARBITRAGE ---
-all_pairs = get_hip3_metadata()
-all_prices = get_spot_prices()
-
-# On regroupe par actif de base (ex: @1) pour trouver les prix en USDC, USDT, USDH
-arb_map = {}
-for p in all_pairs:
-    base = p['base']
-    quote = p['quote']
-    pair_name = p['name']
-    price = float(all_prices.get(pair_name, 0))
-    
-    if base not in arb_map:
-        arb_map[base] = {}
-    arb_map[base][quote] = price
-
-# --- INTERFACE ---
-st.sidebar.header("Paramètres HIP-3")
-stable_to_compare = st.sidebar.selectbox("Comparer USDC contre :", ["USDT", "USDH"])
-
-results = []
-for asset, quotes in arb_map.items():
-    p_usdc = quotes.get("USDC", 0)
-    p_target = quotes.get(stable_to_compare, 0)
-    
-    if p_usdc > 0 and p_target > 0:
-        spread = ((p_target - p_usdc) / p_usdc) * 100
-        results.append({
-            "Actif": asset,
-            "Prix USDC": p_usdc,
-            f"Prix {stable_to_compare}": p_target,
-            "Spread %": round(spread, 4)
-        })
-
-if results:
-    df = pd.DataFrame(results)
-    st.success(f"Détecté {len(df)} actifs HIP-3 avec double cotation.")
-    st.dataframe(df, use_container_width=True)
-else:
-    st.warning("Aucun arbitrage détecté entre USDC et le stable choisi.")
-    with st.expander("🔍 Voir toutes les paires SPOT détectées (Debug)"):
-        st.write(all_pairs)
-
-if st.button("🔄 Refresh"):
+# --- BOUTON DE RECHARGE ---
+if st.sidebar.button("Forcer rafraîchissement"):
     st.cache_data.clear()
     st.rerun()
+
+# --- ÉTAPE 1 : RECHERCHE DANS LES PERPS (META) ---
+st.header("1. Recherche dans l'Univers des Perps (Meta)")
+try:
+    meta = info.meta()
+    perp_names = [asset['name'] for asset in meta.get('universe', [])]
+    nvda_perps = [n for n in perp_names if "NVDA" in n.upper()]
+    
+    if nvda_perps:
+        st.success(f"Trouvé dans Perps : {nvda_perps}")
+    else:
+        st.info("Aucune trace de NVDA dans les Perps classiques.")
+except Exception as e:
+    st.error(f"Erreur Meta Perps : {e}")
+
+# --- ÉTAPE 2 : RECHERCHE DANS LE SPOT (SPOT_META) ---
+st.header("2. Recherche dans l'Univers Spot (Spot Meta)")
+try:
+    spot_meta = info.spot_meta()
+    
+    # On regarde les Tokens (les actifs eux-mêmes)
+    tokens = spot_meta.get('tokens', [])
+    nvda_tokens = [t for t in tokens if "NVDA" in t['name'].upper()]
+    
+    # On regarde les Paires (les marchés de trading)
+    universe = spot_meta.get('universe', [])
+    nvda_pairs = [p['name'] for p in universe if "NVDA" in p['name'].upper()]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Tokens détectés")
+        if nvda_tokens:
+            st.json(nvda_tokens)
+        else:
+            st.write("Aucun token NVDA.")
+            
+    with col2:
+        st.subheader("Marchés (Pairs) détectés")
+        if nvda_pairs:
+            st.success(f"Marchés trouvés : {nvda_pairs}")
+        else:
+            st.write("Aucune paire NVDA.")
+except Exception as e:
+    st.error(f"Erreur Spot Meta : {e}")
+
+# --- ÉTAPE 3 : PRIX EN TEMPS RÉEL ---
+st.header("3. Vérification des prix (All Mids)")
+try:
+    all_prices = info.all_mids()
+    # On cherche toutes les clés qui contiennent NVDA
+    nvda_prices = {k: v for k, v in all_prices.items() if "NVDA" in k.upper()}
+    
+    if nvda_prices:
+        st.write("Prix détectés pour :")
+        st.json(nvda_prices)
+    else:
+        st.warning("L'API 'all_mids' ne renvoie aucun prix contenant le texte 'NVDA'.")
+except Exception as e:
+    st.error(f"Erreur All Mids : {e}")
+
+# --- ÉTAPE 4 : LISTE BRUTE DES 50 PREMIERS (POUR VOIR LE FORMAT) ---
+with st.expander("Voir le format des 50 premiers actifs de l'échange"):
+    if 'all_prices' in locals() and all_prices:
+        st.write(list(all_prices.keys())[:50])
